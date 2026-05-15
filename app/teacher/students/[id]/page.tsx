@@ -180,9 +180,16 @@ function LessonItem({
   const [lightbox, setLightbox] = useState<string | null>(null);
   const { uploadPhoto, deletePhoto, uploading, error: photoError } = useLessonPhotos();
   const done = lesson.status === 'completed';
-  const dateLabel = lesson.scheduled_date
-    ? format(parseISO(lesson.scheduled_date), 'EEE d MMM')
-    : 'No date';
+  const dateLabel = (() => {
+    if (!lesson.scheduled_date) return 'No date';
+    try {
+      const parsed = parseISO(lesson.scheduled_date);
+      if (isNaN(parsed.getTime())) return lesson.scheduled_date;
+      return format(parsed, 'EEE d MMM');
+    } catch {
+      return lesson.scheduled_date;
+    }
+  })();
   const photos = lesson.photo_urls ?? [];
 
   async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
@@ -420,6 +427,16 @@ function StudentMeta({ student }: { student: StudentRow }) {
     const days = daysUntil(student.wedding_date);
     const countdown = formatCountdown(days);
     const inPast = days < 0;
+    // Format defensively — a malformed wedding_date must not crash the page.
+    let dateLabel = student.wedding_date;
+    try {
+      const parsed = parseISO(student.wedding_date);
+      if (!isNaN(parsed.getTime())) {
+        dateLabel = format(parsed, 'EEEE d MMMM yyyy');
+      }
+    } catch {
+      /* fall back to the raw string */
+    }
     return (
       <div className="mt-5 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
         <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-text-dim)]">
@@ -427,7 +444,7 @@ function StudentMeta({ student }: { student: StudentRow }) {
         </div>
         <div className="mt-1 flex flex-wrap items-baseline justify-between gap-2">
           <div className="font-serif text-2xl text-[var(--color-text)]">
-            {format(parseISO(student.wedding_date), 'EEEE d MMMM yyyy')}
+            {dateLabel}
           </div>
           <div
             className={cn(
