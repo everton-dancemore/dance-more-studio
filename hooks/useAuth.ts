@@ -118,9 +118,20 @@ export function useAuth() {
     const {
       data: { subscription },
     } = sb.auth.onAuthStateChange(() => loadSession());
+
+    // FAILSAFE: under no circumstances stay in "loading" state for more than
+    // 8 seconds. If something inside getSession/profile fetch hangs (which
+    // we've seen on flaky iOS Safari sessions), force the spinner off so the
+    // root page can route the user somewhere — even if to /auth.
+    const failsafe = setTimeout(() => {
+      if (!mounted.current) return;
+      setState((prev) => (prev.loading ? { ...prev, loading: false } : prev));
+    }, 8000);
+
     return () => {
       mounted.current = false;
       subscription.unsubscribe();
+      clearTimeout(failsafe);
     };
   }, [loadSession]);
 
