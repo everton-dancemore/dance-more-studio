@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import { LogOut, ChevronRight, Search, Star } from 'lucide-react';
 import { Logo } from '@/components/brand/Logo';
 import { Pill } from '@/components/ui/Pill';
@@ -13,7 +12,6 @@ import { daysUntil, formatCountdown } from '@/lib/countdown';
 import { useState } from 'react';
 
 export default function TeacherViewPage() {
-  const router = useRouter();
   const { user, profile, loading: authLoading, signOut } = useAuth();
   const { students, loading: studentsLoading } = useStudents({
     teacherId: profile?.teacher_id,
@@ -21,9 +19,16 @@ export default function TeacherViewPage() {
   const [query, setQuery] = useState('');
   const [signingOut, setSigningOut] = useState(false);
 
+  // Auth guard — if we resolve to "not signed in" after auth finishes
+  // loading, kick to /auth. Hard navigation (window.location), NOT
+  // router.replace, because the latter has been observed to silently
+  // no-op on iOS Safari/PWA.
   useEffect(() => {
-    if (!authLoading && !user) router.replace('/auth');
-  }, [authLoading, user, router]);
+    if (!authLoading && !user) {
+      console.log('[teacher-page] no user after auth resolved — redirecting to /auth');
+      window.location.replace('/auth');
+    }
+  }, [authLoading, user]);
 
   const { active, completed } = useMemo(() => {
     const q = query.trim().toLowerCase();

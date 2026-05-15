@@ -23,20 +23,38 @@ const EMPTY_AUTH: AuthState = {
   loading: false,
 };
 
+// ---- Timeout helper -------------------------------------------------------
+// Wraps any Promise with a timeout. If the promise doesn't resolve in `ms`
+// milliseconds, the wrapped promise rejects with an Error tagged 'timeout'.
+// Used everywhere we call Supabase, because in production we've seen
+// auth.getSession / signInWithPassword / signOut hang indefinitely on flaky
+// iOS Safari sessions, leaving the UI stuck.
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label}-timeout`)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+
 /**
- * Auth hook.
+ * Auth hook — see MASTER_BRIEF.md §7 + §10 for full design notes.
  *
- * Safety design:
- * 1. `loadSession` never hangs forever — profile/roles fetch has a 6s timeout.
- * 2. If the timeout hits, we still let the user through with empty roles
- *    rather than freezing the UI. Better UX, the user can retry.
- * 3. `signOut` clears state synchronously THEN fires the server call,
- *    so the UI updates instantly even on a flaky network.
- * 4. `signIn` doesn't double-call `loadSession`; the auth-state listener
- *    handles state updates, avoiding the race that left pages stuck on
- *    "Loading…".
- * 5. We guard every setState with a `mounted` ref to avoid leaks /
- *    React warnings when components unmount mid-fetch.
+ * Safety guarantees:
+ *  - `signIn` rejects within 12s (never silently hangs).
+ *  - `signOut` resolves within 6s (state is cleared synchronously first).
+ *  - `loading` is ALWAYS false within 8s of mount, no matter what.
+ *  - Every setState is guarded by a `mounted` ref.
+ *  - Console logs prefixed [auth] are intentional production diagnostics
+ *    so we can read them from Safari Web Inspector / Vercel logs.
  */
 export function useAuth() {
   const [state, setState] = useState<AuthState>({ ...EMPTY_AUTH, loading: true });
@@ -44,41 +62,41 @@ export function useAuth() {
 
   const loadSession = useCallback(async () => {
     const sb = supabase();
+    console.log('[auth] loadSession: start');
 
     try {
-      const {
-        data: { session },
-      } = await sb.auth.getSession();
-      const user = session?.user ?? null;
+      // getSession reads from localStorage — should be near-instant, but
+      // wrap defensively in case Supabase's internal refresh logic stalls.
+      const sessionResult = await withTimeout(sb.auth.getSession(), 4000, 'getSession');
+      const user = sessionResult.data.session?.user ?? null;
 
       if (!user) {
+        console.log('[auth] loadSession: no session found');
         if (mounted.current) setState({ ...EMPTY_AUTH, loading: false });
         return;
       }
 
-      // Set user immediately so callers waiting on `user` can proceed
-      // while we fetch the profile/roles in the background.
+      console.log('[auth] loadSession: session found for', user.email);
+
+      // Set the user immediately so callers waiting on `user` (route
+      // guards on /teacher etc.) can proceed before the profile load
+      // completes.
       if (mounted.current) {
         setState((prev) => ({ ...prev, user, loading: true }));
       }
 
-      // Race profile+roles against a 6-second timeout — never hang the UI.
-      const PROFILE_TIMEOUT_MS = 6000;
-      const profilePromise = Promise.all([
-        sb.from('profiles').select('*').eq('user_id', user.id).maybeSingle(),
-        sb.from('user_roles').select('role').eq('user_id', user.id),
-      ]);
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('profile-timeout')), PROFILE_TIMEOUT_MS)
-      );
-
       try {
-        const [{ data: profile }, { data: rolesRows }] = (await Promise.race([
-          profilePromise,
-          timeoutPromise,
-        ])) as Awaited<typeof profilePromise>;
+        const [{ data: profile }, { data: rolesRows }] = await withTimeout(
+          Promise.all([
+            sb.from('profiles').select('*').eq('user_id', user.id).maybeSingle(),
+            sb.from('user_roles').select('role').eq('user_id', user.id),
+          ]),
+          6000,
+          'profile'
+        );
 
         const roles = ((rolesRows ?? []) as { role: AppRole }[]).map((r) => r.role);
+        console.log('[auth] loadSession: profile loaded, roles =', roles);
         if (!mounted.current) return;
         setState({
           user,
@@ -89,11 +107,9 @@ export function useAuth() {
           loading: false,
         });
       } catch (err) {
-        // Profile load failed or timed out. Let the user through anyway —
-        // they're authenticated, just without role info. The /teacher
-        // page can still render (with empty student list) instead of
-        // freezing on a forever spinner.
-        console.warn('[useAuth] profile load failed:', err);
+        // Profile load failed or timed out. Let the user through with
+        // empty roles rather than freeze on a forever spinner.
+        console.warn('[auth] loadSession: profile fetch failed', err);
         if (!mounted.current) return;
         setState({
           user,
@@ -105,8 +121,7 @@ export function useAuth() {
         });
       }
     } catch (err) {
-      // getSession itself failed — treat as signed out.
-      console.warn('[useAuth] getSession failed:', err);
+      console.warn('[auth] loadSession: getSession failed', err);
       if (mounted.current) setState({ ...EMPTY_AUTH, loading: false });
     }
   }, []);
@@ -114,18 +129,25 @@ export function useAuth() {
   useEffect(() => {
     mounted.current = true;
     loadSession();
+
     const sb = supabase();
     const {
       data: { subscription },
-    } = sb.auth.onAuthStateChange(() => loadSession());
+    } = sb.auth.onAuthStateChange((event) => {
+      console.log('[auth] onAuthStateChange:', event);
+      loadSession();
+    });
 
-    // FAILSAFE: under no circumstances stay in "loading" state for more than
-    // 8 seconds. If something inside getSession/profile fetch hangs (which
-    // we've seen on flaky iOS Safari sessions), force the spinner off so the
-    // root page can route the user somewhere — even if to /auth.
+    // Hard failsafe — `loading` cannot stay true for more than 8 seconds
+    // under any circumstances. This catches hangs deep in Supabase that
+    // even per-call timeouts couldn't reach (e.g. token refresh deadlocks).
     const failsafe = setTimeout(() => {
       if (!mounted.current) return;
-      setState((prev) => (prev.loading ? { ...prev, loading: false } : prev));
+      setState((prev) => {
+        if (!prev.loading) return prev;
+        console.warn('[auth] failsafe fired — forcing loading=false');
+        return { ...prev, loading: false };
+      });
     }, 8000);
 
     return () => {
@@ -136,22 +158,41 @@ export function useAuth() {
   }, [loadSession]);
 
   const signIn = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase().auth.signInWithPassword({ email, password });
-    if (error) throw error;
-    // onAuthStateChange fires and runs loadSession — no manual await needed.
+    console.log('[auth] signIn: started');
+    try {
+      const { data, error } = await withTimeout(
+        supabase().auth.signInWithPassword({ email, password }),
+        12000,
+        'signIn'
+      );
+
+      if (error) {
+        console.warn('[auth] signIn: error from Supabase', error.message);
+        throw error;
+      }
+      if (!data.session) {
+        console.warn('[auth] signIn: no session returned (no error either?!)');
+        throw new Error('Sign-in succeeded but no session was returned.');
+      }
+      console.log('[auth] signIn: success — session for', data.user?.email);
+      // onAuthStateChange will fire and update state in the background.
+      // Caller can hard-navigate immediately.
+    } catch (err) {
+      // Re-throw so the page-level handler can show the error to the user.
+      throw err;
+    }
   }, []);
 
   const signOut = useCallback(async () => {
-    // Clear state immediately so the UI is responsive even if the network
-    // call below is slow or fails. The user is "signed out" from the app's
-    // perspective the instant they click the button.
+    console.log('[auth] signOut: started');
+    // Clear local state immediately — UI is responsive even if the
+    // network call below is slow or fails.
     if (mounted.current) setState({ ...EMPTY_AUTH, loading: false });
     try {
-      await supabase().auth.signOut();
+      await withTimeout(supabase().auth.signOut(), 6000, 'signOut');
+      console.log('[auth] signOut: success');
     } catch (err) {
-      // Network failed — the local session is still cleared above, so the
-      // user can keep using the app as signed out. We just log it.
-      console.warn('[useAuth] signOut network error:', err);
+      console.warn('[auth] signOut: error (ignored, local state already cleared)', err);
     }
   }, []);
 

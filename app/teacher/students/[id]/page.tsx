@@ -1,8 +1,6 @@
 'use client';
 
 import { use, useEffect } from 'react';
-import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import { ArrowLeft, Star, Check, Camera, Heart, Target, X } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import { Logo } from '@/components/brand/Logo';
@@ -25,15 +23,18 @@ interface PageProps {
 
 export default function StudentFilePage({ params }: PageProps) {
   const { id } = use(params);
-  const router = useRouter();
   const { user, loading: authLoading } = useAuth();
   const { student, loading: studentLoading } = useStudent(id);
   const { lessons, loading: lessonsLoading, markComplete, updateLesson, toggleFavourite } =
     useLessons(id);
 
+  // Auth guard. Hard navigation, not router.replace — see app/teacher/page.tsx.
   useEffect(() => {
-    if (!authLoading && !user) router.replace('/auth');
-  }, [authLoading, user, router]);
+    if (!authLoading && !user) {
+      console.log('[student-file] no user — redirecting to /auth');
+      window.location.replace('/auth');
+    }
+  }, [authLoading, user]);
 
   const loading = authLoading || studentLoading || lessonsLoading;
 
@@ -81,9 +82,9 @@ export default function StudentFilePage({ params }: PageProps) {
             <p className="mt-2 text-sm text-[var(--color-text-mute)]">
               They may have been removed, or the link is wrong.
             </p>
-            <Link href="/teacher" className="mt-6 inline-flex">
-              <Button>Back to my students</Button>
-            </Link>
+            <Button className="mt-6" onClick={() => window.location.assign('/teacher')}>
+              Back to my students
+            </Button>
           </div>
         ) : (
           <>
