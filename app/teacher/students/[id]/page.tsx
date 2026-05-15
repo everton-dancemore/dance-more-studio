@@ -46,13 +46,14 @@ export default function StudentFilePage({ params }: PageProps) {
       {/* Sticky top bar */}
       <header className="sticky top-0 z-30 border-b border-[var(--color-border)] bg-[color-mix(in_oklab,var(--color-bg)_88%,transparent)] backdrop-blur-md">
         <div className="mx-auto flex h-14 max-w-2xl items-center gap-3 px-4">
-          <Link
-            href="/teacher"
+          <button
+            type="button"
+            onClick={() => window.location.assign('/teacher')}
             className="inline-flex h-9 w-9 items-center justify-center rounded-full text-[var(--color-text-mute)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text)]"
             aria-label="Back"
           >
             <ArrowLeft size={18} />
-          </Link>
+          </button>
           <Logo size="sm" />
           <span className="ml-2 truncate text-xs uppercase tracking-[0.18em] text-[var(--color-text-dim)]">
             Student file

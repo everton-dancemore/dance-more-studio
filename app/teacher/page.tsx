@@ -53,11 +53,11 @@ export default function TeacherViewPage() {
               setSigningOut(true);
               try {
                 await signOut();
-                router.replace('/auth');
               } catch (error) {
                 console.error('Sign out failed:', error);
-                setSigningOut(false);
               }
+              // Hard navigation — more reliable than router.replace on iOS PWA.
+              window.location.replace('/auth');
             }}
             disabled={signingOut}
             className="ml-auto inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-xs text-[var(--color-text-mute)] hover:text-[var(--color-text)] disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"

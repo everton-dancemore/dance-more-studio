@@ -1,7 +1,6 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
 import { Input, Label } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
@@ -9,24 +8,34 @@ import { Logo } from '@/components/brand/Logo';
 import { useAuth } from '@/hooks/useAuth';
 
 export default function AuthPage() {
-  const router = useRouter();
-  const { signIn } = useAuth();
+  const { signIn, user, loading } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // If we're already signed in, leave the auth page immediately.
+  // Use a hard navigation (window.location) instead of next/router because
+  // we've seen iOS Safari occasionally swallow client-side route changes.
+  useEffect(() => {
+    if (!loading && user) {
+      window.location.replace('/teacher');
+    }
+  }, [user, loading]);
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (busy) return;
     setError(null);
     setBusy(true);
     try {
       await signIn(email.trim(), password);
-      router.push('/');
+      // Hard navigation — bypasses any client-side router weirdness on iOS.
+      window.location.replace('/teacher');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not sign in.');
-    } finally {
+      const msg = err instanceof Error ? err.message : 'Could not sign in.';
+      setError(msg);
       setBusy(false);
     }
   }

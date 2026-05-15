@@ -1,31 +1,22 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { Logo } from '@/components/brand/Logo';
 import { useAuth } from '@/hooks/useAuth';
 
 export default function RootPage() {
-  const router = useRouter();
-  const { user, isTeacher, isAdmin, profile, loading } = useAuth();
+  const { user, loading } = useAuth();
   const [slowLoad, setSlowLoad] = useState(false);
 
+  // Hard navigations — more reliable than client-side router on iOS Safari/PWA.
   useEffect(() => {
     if (loading) return;
     if (!user) {
-      router.replace('/auth');
+      window.location.replace('/auth');
       return;
     }
-    if (isTeacher && profile?.teacher_id) {
-      router.replace('/teacher');
-      return;
-    }
-    if (isAdmin) {
-      router.replace('/teacher');
-      return;
-    }
-    router.replace('/teacher');
-  }, [user, isTeacher, isAdmin, profile, loading, router]);
+    window.location.replace('/teacher');
+  }, [user, loading]);
 
   // Surface a "still loading" message + manual retry after 3s so users are
   // never silently stuck on the spinner.
