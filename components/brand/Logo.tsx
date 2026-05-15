@@ -38,7 +38,7 @@ export function Logo({
         fill
         sizes={`${dims.w}px`}
         priority={size === 'lg'}
-        className="object-cover scale-[1.6]"
+        className="object-cover"
       />
     </span>
   );
