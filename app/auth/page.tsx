@@ -5,7 +5,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import { Input, Label } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { Logo } from '@/components/brand/Logo';
-import { useAuth } from '@/hooks/useAuth';
+import { useAuth, hasJustSignedOut } from '@/hooks/useAuth';
 
 /**
  * Translate Supabase/internal auth errors into something a non-technical
@@ -44,11 +44,28 @@ export default function AuthPage() {
   const safetyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const slowTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Snapshot the "just signed out" flag at mount time. If the user just
+  // hit Sign out, we deliberately stay on /auth even if useAuth briefly
+  // reports a user (e.g. before its own short-circuit kicks in). The
+  // flag is consumed by useAuth itself on its first loadSession call.
+  const justSignedOutOnMount = useRef(false);
+  useEffect(() => {
+    justSignedOutOnMount.current = hasJustSignedOut();
+    if (justSignedOutOnMount.current) {
+      console.log('[auth-page] mount: just-signed-out flag detected, holding on /auth');
+    }
+  }, []);
+
   // If already signed in (e.g. user opens /auth while having a valid
   // session), bounce them straight to /teacher. Hard navigation, not
   // router.push — iOS Safari occasionally drops client-side route
   // changes when running as an installed PWA.
   useEffect(() => {
+    if (justSignedOutOnMount.current) {
+      // User just clicked Sign out on this navigation — do NOT bounce
+      // them back into the dashboard. They explicitly want to be here.
+      return;
+    }
     if (!loading && user) {
       console.log('[auth-page] already signed in, redirecting to /teacher');
       window.location.replace('/teacher');

@@ -55,12 +55,14 @@ export default function TeacherViewPage() {
           <button
             onClick={async () => {
               if (signingOut) return;
+              console.log('[teacher-page] sign-out button clicked');
               setSigningOut(true);
               try {
                 await signOut();
               } catch (error) {
-                console.error('Sign out failed:', error);
+                console.error('[teacher-page] signOut threw (ignored):', error);
               }
+              console.log('[teacher-page] redirecting to /auth');
               // Hard navigation — more reliable than router.replace on iOS PWA.
               window.location.replace('/auth');
             }}

@@ -23,12 +23,17 @@ const EMPTY_AUTH: AuthState = {
   loading: false,
 };
 
-// ---- Timeout helper -------------------------------------------------------
-// Wraps any Promise with a timeout. If the promise doesn't resolve in `ms`
-// milliseconds, the wrapped promise rejects with an Error tagged 'timeout'.
-// Used everywhere we call Supabase, because in production we've seen
-// auth.getSession / signInWithPassword / signOut hang indefinitely on flaky
-// iOS Safari sessions, leaving the UI stuck.
+/**
+ * Sentinel keys we set in sessionStorage to communicate "the user just
+ * clicked Sign out" across the hard navigation to /auth. Without this,
+ * if Supabase fails to clear localStorage promptly (which we've seen),
+ * /auth's useAuth would re-read the stale session and bounce the user
+ * straight back into the dashboard.
+ */
+const JUST_SIGNED_OUT_KEY = 'dm-just-signed-out';
+
+// ---- Helpers --------------------------------------------------------------
+
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`${label}-timeout`)), ms);
@@ -46,27 +51,92 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 /**
- * Auth hook — see MASTER_BRIEF.md §7 + §10 for full design notes.
- *
- * Safety guarantees:
- *  - `signIn` rejects within 12s (never silently hangs).
- *  - `signOut` resolves within 6s (state is cleared synchronously first).
- *  - `loading` is ALWAYS false within 8s of mount, no matter what.
- *  - Every setState is guarded by a `mounted` ref.
- *  - Console logs prefixed [auth] are intentional production diagnostics
- *    so we can read them from Safari Web Inspector / Vercel logs.
+ * Synchronously remove every Supabase-related key from localStorage AND
+ * sessionStorage. We've observed that `supabase.auth.signOut()` alone
+ * sometimes leaves residual entries (e.g. when the network call to
+ * invalidate the global refresh token fails). Clearing manually before
+ * navigating to /auth guarantees the next page-load finds no session.
+ */
+function nukeSupabaseStorage() {
+  if (typeof window === 'undefined') return;
+  let cleared = 0;
+  try {
+    Object.keys(localStorage).forEach((k) => {
+      if (k.startsWith('sb-') || k.toLowerCase().includes('supabase')) {
+        localStorage.removeItem(k);
+        cleared++;
+      }
+    });
+  } catch {
+    /* private mode etc. — ignore */
+  }
+  try {
+    Object.keys(sessionStorage).forEach((k) => {
+      if (k.startsWith('sb-') || k.toLowerCase().includes('supabase')) {
+        sessionStorage.removeItem(k);
+        cleared++;
+      }
+    });
+  } catch {
+    /* ignore */
+  }
+  console.log(`[auth] nukeSupabaseStorage: cleared ${cleared} storage keys`);
+}
+
+function hasJustSignedOut(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return sessionStorage.getItem(JUST_SIGNED_OUT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function consumeJustSignedOut() {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.removeItem(JUST_SIGNED_OUT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+function setJustSignedOut() {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.setItem(JUST_SIGNED_OUT_KEY, '1');
+  } catch {
+    /* ignore */
+  }
+}
+
+// Exported so the /auth page can check it without instantiating useAuth.
+export { hasJustSignedOut, consumeJustSignedOut };
+
+/**
+ * useAuth hook — see MASTER_BRIEF.md §7 + §10.
  */
 export function useAuth() {
   const [state, setState] = useState<AuthState>({ ...EMPTY_AUTH, loading: true });
   const mounted = useRef(true);
 
   const loadSession = useCallback(async () => {
-    const sb = supabase();
     console.log('[auth] loadSession: start');
 
+    // Belt-and-braces: if the user just hit Sign out, do NOT consult
+    // Supabase at all this load. Treat as fully signed out, then the
+    // flag is consumed and normal behaviour resumes next time.
+    if (hasJustSignedOut()) {
+      console.log('[auth] loadSession: just-signed-out flag set — short-circuiting');
+      consumeJustSignedOut();
+      // Also nuke storage one more time in case anything snuck back.
+      nukeSupabaseStorage();
+      if (mounted.current) setState({ ...EMPTY_AUTH, loading: false });
+      return;
+    }
+
+    const sb = supabase();
     try {
-      // getSession reads from localStorage — should be near-instant, but
-      // wrap defensively in case Supabase's internal refresh logic stalls.
       const sessionResult = await withTimeout(sb.auth.getSession(), 4000, 'getSession');
       const user = sessionResult.data.session?.user ?? null;
 
@@ -77,10 +147,6 @@ export function useAuth() {
       }
 
       console.log('[auth] loadSession: session found for', user.email);
-
-      // Set the user immediately so callers waiting on `user` (route
-      // guards on /teacher etc.) can proceed before the profile load
-      // completes.
       if (mounted.current) {
         setState((prev) => ({ ...prev, user, loading: true }));
       }
@@ -107,8 +173,6 @@ export function useAuth() {
           loading: false,
         });
       } catch (err) {
-        // Profile load failed or timed out. Let the user through with
-        // empty roles rather than freeze on a forever spinner.
         console.warn('[auth] loadSession: profile fetch failed', err);
         if (!mounted.current) return;
         setState({
@@ -135,12 +199,16 @@ export function useAuth() {
       data: { subscription },
     } = sb.auth.onAuthStateChange((event) => {
       console.log('[auth] onAuthStateChange:', event);
+      // If the listener fires SIGNED_IN while we're in just-signed-out mode,
+      // ignore it — the user is mid-logout. Otherwise re-load session.
+      if (event === 'SIGNED_IN' && hasJustSignedOut()) {
+        console.log('[auth] onAuthStateChange: ignoring SIGNED_IN during logout');
+        return;
+      }
       loadSession();
     });
 
-    // Hard failsafe — `loading` cannot stay true for more than 8 seconds
-    // under any circumstances. This catches hangs deep in Supabase that
-    // even per-call timeouts couldn't reach (e.g. token refresh deadlocks).
+    // Hard failsafe — loading cannot stay true beyond 8 seconds.
     const failsafe = setTimeout(() => {
       if (!mounted.current) return;
       setState((prev) => {
@@ -159,41 +227,52 @@ export function useAuth() {
 
   const signIn = useCallback(async (email: string, password: string) => {
     console.log('[auth] signIn: started');
-    try {
-      const { data, error } = await withTimeout(
-        supabase().auth.signInWithPassword({ email, password }),
-        12000,
-        'signIn'
-      );
-
-      if (error) {
-        console.warn('[auth] signIn: error from Supabase', error.message);
-        throw error;
-      }
-      if (!data.session) {
-        console.warn('[auth] signIn: no session returned (no error either?!)');
-        throw new Error('Sign-in succeeded but no session was returned.');
-      }
-      console.log('[auth] signIn: success — session for', data.user?.email);
-      // onAuthStateChange will fire and update state in the background.
-      // Caller can hard-navigate immediately.
-    } catch (err) {
-      // Re-throw so the page-level handler can show the error to the user.
-      throw err;
+    const { data, error } = await withTimeout(
+      supabase().auth.signInWithPassword({ email, password }),
+      12000,
+      'signIn'
+    );
+    if (error) {
+      console.warn('[auth] signIn: error from Supabase', error.message);
+      throw error;
     }
+    if (!data.session) {
+      throw new Error('Sign-in succeeded but no session was returned.');
+    }
+    console.log('[auth] signIn: success — session for', data.user?.email);
   }, []);
 
+  /**
+   * signOut sequence (in order):
+   *  1. Set sessionStorage flag so the next page-load short-circuits.
+   *  2. Clear local React state immediately (UI updates instantly).
+   *  3. Synchronously nuke ALL sb-* / supabase-* storage keys so the
+   *     next getSession() finds nothing.
+   *  4. Call supabase.auth.signOut({ scope: 'local' }) as fire-and-
+   *     forget. Local scope avoids the network round-trip that would
+   *     otherwise be required to revoke the global refresh token —
+   *     faster and reliable on flaky networks.
+   *  5. Resolve. The caller is expected to hard-navigate to /auth
+   *     immediately after.
+   */
   const signOut = useCallback(async () => {
-    console.log('[auth] signOut: started');
-    // Clear local state immediately — UI is responsive even if the
-    // network call below is slow or fails.
+    console.log('[auth] signOut: clicked');
+    setJustSignedOut();
     if (mounted.current) setState({ ...EMPTY_AUTH, loading: false });
+    nukeSupabaseStorage();
+    console.log('[auth] signOut: local state + storage cleared');
     try {
-      await withTimeout(supabase().auth.signOut(), 6000, 'signOut');
-      console.log('[auth] signOut: success');
+      await withTimeout(
+        supabase().auth.signOut({ scope: 'local' }),
+        4000,
+        'signOut'
+      );
+      console.log('[auth] signOut: supabase.auth.signOut completed');
     } catch (err) {
-      console.warn('[auth] signOut: error (ignored, local state already cleared)', err);
+      console.warn('[auth] signOut: supabase.auth.signOut failed (storage already cleared)', err);
     }
+    // One more pass after Supabase's own logic ran, in case it re-wrote anything.
+    nukeSupabaseStorage();
   }, []);
 
   return { ...state, signIn, signOut, refresh: loadSession };
